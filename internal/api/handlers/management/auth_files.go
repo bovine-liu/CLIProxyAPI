@@ -390,6 +390,15 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	if auth.LastError != nil {
+		entry["last_error"] = auth.LastError
+	}
+	if auth.Quota.Exceeded || auth.Quota.Reason != "" || !auth.Quota.NextRecoverAt.IsZero() || auth.Quota.BackoffLevel > 0 {
+		entry["quota"] = auth.Quota
+	}
+	if modelStates := buildModelStateEntries(auth.ModelStates); len(modelStates) > 0 {
+		entry["model_states"] = modelStates
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
@@ -465,6 +474,41 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		}
 	}
 	return entry
+}
+
+func buildModelStateEntries(states map[string]*coreauth.ModelState) gin.H {
+	if len(states) == 0 {
+		return nil
+	}
+	out := gin.H{}
+	for model, state := range states {
+		model = strings.TrimSpace(model)
+		if model == "" || state == nil {
+			continue
+		}
+		entry := gin.H{
+			"status":         state.Status,
+			"status_message": state.StatusMessage,
+			"unavailable":    state.Unavailable,
+		}
+		if state.LastError != nil {
+			entry["last_error"] = state.LastError
+		}
+		if !state.NextRetryAfter.IsZero() {
+			entry["next_retry_after"] = state.NextRetryAfter
+		}
+		if !state.UpdatedAt.IsZero() {
+			entry["updated_at"] = state.UpdatedAt
+		}
+		if state.Quota.Exceeded || state.Quota.Reason != "" || !state.Quota.NextRecoverAt.IsZero() || state.Quota.BackoffLevel > 0 {
+			entry["quota"] = state.Quota
+		}
+		out[model] = entry
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
