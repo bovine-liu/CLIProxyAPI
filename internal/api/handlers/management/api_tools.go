@@ -131,6 +131,10 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	if authIndex != "" && auth == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth not found for auth_index"})
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {
@@ -155,6 +159,10 @@ func (h *Handler) APICall(c *gin.Context) {
 				return
 			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+			return
+		}
+		if auth == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth not found for token placeholder"})
 			return
 		}
 		if token == "" {

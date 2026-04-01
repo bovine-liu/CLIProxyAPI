@@ -1,13 +1,17 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http/httptest"
 	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
@@ -109,5 +113,40 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestAPICallRejectsUnknownAuthIndexBeforeSendingTokenPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	h := &Handler{}
+
+	body := map[string]any{
+		"auth_index": "missing-auth-index",
+		"method":     "GET",
+		"url":        "https://example.com/v1/ping",
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+		},
+	}
+	raw, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		t.Fatalf("marshal request body: %v", errMarshal)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	h.APICall(c)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("auth not found for auth_index")) {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }
