@@ -216,6 +216,10 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if auth != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		h.markAuthHealthy(c.Request.Context(), auth, body.Data)
+	}
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
@@ -233,6 +237,55 @@ func firstNonEmptyString(values ...*string) string {
 		}
 	}
 	return ""
+}
+
+func (h *Handler) markAuthHealthy(ctx context.Context, auth *coreauth.Auth, rawData string) {
+	if h == nil || h.authManager == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+
+	current, ok := h.authManager.GetByID(auth.ID)
+	if !ok || current == nil {
+		current = auth
+	}
+
+	updated := current.Clone()
+	now := time.Now()
+	updated.Unavailable = false
+	updated.Status = coreauth.StatusActive
+	updated.StatusMessage = ""
+	updated.LastError = nil
+	updated.NextRetryAfter = time.Time{}
+	updated.Quota = coreauth.QuotaState{}
+	updated.UpdatedAt = now
+
+	if model := apiCallModel(rawData); model != "" && len(updated.ModelStates) > 0 {
+		if state, okState := updated.ModelStates[model]; okState && state != nil {
+			state.Unavailable = false
+			state.Status = coreauth.StatusActive
+			state.StatusMessage = ""
+			state.LastError = nil
+			state.NextRetryAfter = time.Time{}
+			state.Quota = coreauth.QuotaState{}
+			state.UpdatedAt = now
+		}
+	}
+
+	_, _ = h.authManager.Update(ctx, updated)
+}
+
+func apiCallModel(rawData string) string {
+	rawData = strings.TrimSpace(rawData)
+	if rawData == "" {
+		return ""
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(rawData), &body); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Model)
 }
 
 func tokenValueForAuth(auth *coreauth.Auth) string {

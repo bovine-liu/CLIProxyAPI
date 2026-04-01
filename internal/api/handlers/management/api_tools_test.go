@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http/httptest"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/gin-gonic/gin"
 )
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
@@ -148,5 +149,144 @@ func TestAPICallRejectsUnknownAuthIndexBeforeSendingTokenPlaceholder(t *testing.
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte("auth not found for auth_index")) {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestAPICallSuccessfulProbeClearsStaleAuthState(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	staleRetryAt := time.Now().Add(30 * time.Minute)
+	auth := &coreauth.Auth{
+		ID:             "auth-1",
+		Provider:       "openai",
+		Status:         coreauth.StatusError,
+		StatusMessage:  `{"detail":"Unauthorized"}`,
+		Unavailable:    true,
+		NextRetryAfter: staleRetryAt,
+		Attributes: map[string]string{
+			"api_key": "test-token",
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5.4": {
+				Status:         coreauth.StatusError,
+				StatusMessage:  `{"detail":"Unauthorized"}`,
+				Unavailable:    true,
+				NextRetryAfter: staleRetryAt,
+				LastError: &coreauth.Error{
+					Code:       "unauthorized",
+					Message:    "unauthorized",
+					Retryable:  true,
+					HTTPStatus: http.StatusUnauthorized,
+				},
+				Quota: coreauth.QuotaState{
+					Exceeded:     true,
+					Reason:       "stale",
+					BackoffLevel: 3,
+				},
+			},
+		},
+		LastError: &coreauth.Error{
+			Code:       "unauthorized",
+			Message:    "unauthorized",
+			Retryable:  true,
+			HTTPStatus: http.StatusUnauthorized,
+		},
+		Quota: coreauth.QuotaState{
+			Exceeded:     true,
+			Reason:       "stale",
+			BackoffLevel: 3,
+		},
+	}
+
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("authorization header = %q, want %q", got, "Bearer test-token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	h := &Handler{authManager: manager}
+
+	body := map[string]any{
+		"auth_index": auth.EnsureIndex(),
+		"method":     "POST",
+		"url":        upstream.URL + "/backend-api/codex/responses/compact",
+		"header": map[string]string{
+			"Authorization": "Bearer $TOKEN$",
+			"Content-Type":  "application/json",
+		},
+		"data": `{"model":"gpt-5.4","input":"ping"}`,
+	}
+	raw, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		t.Fatalf("marshal request body: %v", errMarshal)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	h.APICall(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected updated auth in manager")
+	}
+	if updated.Status != coreauth.StatusActive {
+		t.Fatalf("auth status = %q, want %q", updated.Status, coreauth.StatusActive)
+	}
+	if updated.Unavailable {
+		t.Fatal("expected auth unavailable=false after successful probe")
+	}
+	if updated.StatusMessage != "" {
+		t.Fatalf("auth status_message = %q, want empty", updated.StatusMessage)
+	}
+	if updated.LastError != nil {
+		t.Fatalf("auth last_error = %#v, want nil", updated.LastError)
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("auth next_retry_after = %v, want zero", updated.NextRetryAfter)
+	}
+	if updated.Quota.Exceeded {
+		t.Fatalf("auth quota exceeded = %v, want false", updated.Quota.Exceeded)
+	}
+
+	state := updated.ModelStates["gpt-5.4"]
+	if state == nil {
+		t.Fatal("expected model state for gpt-5.4")
+	}
+	if state.Status != coreauth.StatusActive {
+		t.Fatalf("model status = %q, want %q", state.Status, coreauth.StatusActive)
+	}
+	if state.Unavailable {
+		t.Fatal("expected model unavailable=false after successful probe")
+	}
+	if state.StatusMessage != "" {
+		t.Fatalf("model status_message = %q, want empty", state.StatusMessage)
+	}
+	if state.LastError != nil {
+		t.Fatalf("model last_error = %#v, want nil", state.LastError)
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatalf("model next_retry_after = %v, want zero", state.NextRetryAfter)
+	}
+	if state.Quota.Exceeded {
+		t.Fatalf("model quota exceeded = %v, want false", state.Quota.Exceeded)
 	}
 }
