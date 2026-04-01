@@ -222,7 +222,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	} else {
 		delete(w.fileAuthsByPath, normalized)
 	}
-	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
+	// A real file change should always refresh the in-memory auth entry, even when
+	// the synthesized auth fields are semantically unchanged. Otherwise stale
+	// runtime error state (for example a previous Unauthorized marker) can linger
+	// in coreManager indefinitely.
+	updates := w.computePerPathUpdatesLocked(oldByID, newByID, true)
 	w.clientsMutex.Unlock()
 
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
@@ -240,14 +244,14 @@ func (w *Watcher) removeClient(path string) {
 	delete(w.lastAuthContents, normalized)
 	delete(w.fileAuthsByPath, normalized)
 
-	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{})
+	updates := w.computePerPathUpdatesLocked(oldByID, map[string]*coreauth.Auth{}, false)
 	w.clientsMutex.Unlock()
 
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
 }
 
-func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth) []AuthUpdate {
+func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth, forceModify bool) []AuthUpdate {
 	if w.currentAuths == nil {
 		w.currentAuths = make(map[string]*coreauth.Auth)
 	}
@@ -259,7 +263,7 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: newAuth.Clone()})
 			continue
 		}
-		if !authEqual(existing, newAuth) {
+		if forceModify || !authEqual(existing, newAuth) {
 			w.currentAuths[id] = newAuth.Clone()
 			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: newAuth.Clone()})
 		}

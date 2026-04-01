@@ -1603,6 +1603,38 @@ func TestPrepareAuthUpdatesLockedForceAndDelete(t *testing.T) {
 	}
 }
 
+func TestComputePerPathUpdatesLockedForceModifyOnFileRewrite(t *testing.T) {
+	w := &Watcher{
+		currentAuths: map[string]*coreauth.Auth{
+			"a": {
+				ID:            "a",
+				Provider:      "codex",
+				Status:        coreauth.StatusError,
+				StatusMessage: `{"detail":"Unauthorized"}`,
+				Unavailable:   true,
+			},
+		},
+	}
+
+	oldByID := map[string]*coreauth.Auth{
+		"a": {ID: "a", Provider: "codex"},
+	}
+	newByID := map[string]*coreauth.Auth{
+		"a": {ID: "a", Provider: "codex", Status: coreauth.StatusActive},
+	}
+
+	updates := w.computePerPathUpdatesLocked(oldByID, newByID, true)
+	if len(updates) != 1 {
+		t.Fatalf("expected one forced modify update, got %+v", updates)
+	}
+	if updates[0].Action != AuthUpdateActionModify || updates[0].ID != "a" {
+		t.Fatalf("unexpected update: %+v", updates[0])
+	}
+	if updates[0].Auth == nil || updates[0].Auth.Status != coreauth.StatusActive {
+		t.Fatalf("expected rewritten auth to reset status to active, got %+v", updates[0].Auth)
+	}
+}
+
 func TestAuthEqualIgnoresTemporalFields(t *testing.T) {
 	now := time.Now()
 	a := &coreauth.Auth{ID: "x", CreatedAt: now}
