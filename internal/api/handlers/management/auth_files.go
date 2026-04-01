@@ -246,10 +246,19 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromDisk(c)
 		return
 	}
+	usageCounts := h.authUsageCounts()
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
+			if auth != nil {
+				auth.EnsureIndex()
+				if counts, ok := usageCounts[auth.Index]; ok {
+					entry["success_count"] = counts.SuccessCount
+					entry["failure_count"] = counts.FailureCount
+					entry["total_requests"] = counts.TotalRequests
+				}
+			}
 			files = append(files, entry)
 		}
 	}
@@ -259,6 +268,42 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"files": files})
+}
+
+type authUsageCount struct {
+	SuccessCount int64
+	FailureCount int64
+	TotalRequests int64
+}
+
+func (h *Handler) authUsageCounts() map[string]authUsageCount {
+	if h == nil || h.usageStats == nil {
+		return nil
+	}
+	snapshot := h.usageStats.Snapshot()
+	if len(snapshot.APIs) == 0 {
+		return nil
+	}
+	out := make(map[string]authUsageCount)
+	for _, api := range snapshot.APIs {
+		for _, model := range api.Models {
+			for _, detail := range model.Details {
+				authIndex := strings.TrimSpace(detail.AuthIndex)
+				if authIndex == "" {
+					continue
+				}
+				counts := out[authIndex]
+				counts.TotalRequests++
+				if detail.Failed {
+					counts.FailureCount++
+				} else {
+					counts.SuccessCount++
+				}
+				out[authIndex] = counts
+			}
+		}
+	}
+	return out
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
