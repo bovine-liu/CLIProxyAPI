@@ -157,10 +157,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if shouldFallbackCodexCompact(httpResp.StatusCode, b) {
-			logWithRequestID(ctx).Debug("codex executor: retrying non-stream request via /responses/compact after unauthorized /responses")
-			return e.executeCompact(ctx, auth, req, opts)
-		}
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
@@ -701,18 +697,6 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 		err.retryAfter = retryAfter
 	}
 	return err
-}
-
-func shouldFallbackCodexCompact(statusCode int, body []byte) bool {
-	if statusCode != http.StatusUnauthorized || len(body) == 0 {
-		return false
-	}
-	detail := strings.TrimSpace(gjson.GetBytes(body, "detail").String())
-	if strings.EqualFold(detail, "Unauthorized") {
-		return true
-	}
-	msg := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
-	return strings.EqualFold(msg, "Unauthorized")
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
